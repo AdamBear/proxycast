@@ -34,7 +34,7 @@ export function useMcpServers() {
   };
 
   // 从所有应用导入 MCP 配置
-  const importFromAllApps = async (): Promise<number> => {
+  const importFromAllApps = useCallback(async (): Promise<number> => {
     setImporting(true);
     try {
       let total = 0;
@@ -47,7 +47,7 @@ export function useMcpServers() {
     } finally {
       setImporting(false);
     }
-  };
+  }, [fetchServers]);
 
   // 同步所有配置到实际配置文件
   const syncAllToLive = async () => {
@@ -67,7 +67,7 @@ export function useMcpServers() {
       }
     };
     init();
-  }, [fetchServers]);
+  }, [fetchServers, importFromAllApps]);
 
   const addServer = async (server: Omit<McpServer, "id" | "created_at">) => {
     const newServer: McpServer = {

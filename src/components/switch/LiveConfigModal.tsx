@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { X, RefreshCw, FileText } from "lucide-react";
 import { switchApi, AppType } from "@/lib/api/switch";
 
@@ -19,7 +19,7 @@ export function LiveConfigModal({ appType, onClose }: LiveConfigModalProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -30,11 +30,11 @@ export function LiveConfigModal({ appType, onClose }: LiveConfigModalProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [appType]);
 
   useEffect(() => {
     loadConfig();
-  }, [appType]);
+  }, [loadConfig]);
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
