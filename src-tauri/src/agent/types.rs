@@ -5,6 +5,74 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Provider 类型枚举
+///
+/// 决定使用哪种 API 协议
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderType {
+    /// Claude (Anthropic 协议)
+    Claude,
+    /// Claude OAuth (Anthropic 协议)
+    ClaudeOauth,
+    /// Kiro/CodeWhisperer (AWS Event Stream 协议)
+    Kiro,
+    /// Gemini (Gemini 协议)
+    Gemini,
+    /// OpenAI 及其兼容服务 (默认)
+    #[default]
+    OpenAI,
+    /// 通义千问 (OpenAI 兼容)
+    Qwen,
+    /// Codex (OpenAI 兼容)
+    Codex,
+    /// Antigravity (OpenAI 兼容)
+    Antigravity,
+    /// iFlow (OpenAI 兼容)
+    IFlow,
+}
+
+impl ProviderType {
+    /// 从字符串解析 provider 类型
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "claude" => Self::Claude,
+            "claude_oauth" => Self::ClaudeOauth,
+            "kiro" => Self::Kiro,
+            "gemini" => Self::Gemini,
+            "openai" => Self::OpenAI,
+            "qwen" => Self::Qwen,
+            "codex" => Self::Codex,
+            "antigravity" => Self::Antigravity,
+            "iflow" => Self::IFlow,
+            _ => Self::OpenAI, // 默认使用 OpenAI 协议
+        }
+    }
+
+    /// 获取 API 端点路径
+    pub fn endpoint(&self) -> &'static str {
+        match self {
+            Self::Claude | Self::ClaudeOauth => "/v1/messages",
+            Self::Kiro => "/v1/chat/completions", // Kiro 使用 OpenAI 兼容格式，但后端会转换
+            Self::Gemini => "/v1/gemini/chat/completions",
+            _ => "/v1/chat/completions",
+        }
+    }
+
+    /// 是否使用 Anthropic 协议
+    pub fn is_anthropic(&self) -> bool {
+        matches!(self, Self::Claude | Self::ClaudeOauth)
+    }
+
+    /// 是否使用 OpenAI 兼容协议
+    pub fn is_openai_compatible(&self) -> bool {
+        matches!(
+            self,
+            Self::OpenAI | Self::Qwen | Self::Codex | Self::Antigravity | Self::IFlow | Self::Kiro
+        )
+    }
+}
+
 /// Agent 会话状态
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSession {
@@ -239,6 +307,9 @@ pub enum StreamEvent {
         tool_name: String,
         /// 工具调用 ID
         tool_id: String,
+        /// 工具参数（JSON 字符串）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        arguments: Option<String>,
     },
 
     /// 工具调用结束
@@ -251,10 +322,15 @@ pub enum StreamEvent {
         result: ToolExecutionResult,
     },
 
-    /// 完成
+    /// 完成（单次 API 响应完成，工具循环可能继续）
     /// Requirements: 1.3 - THE Streaming_Handler SHALL emit a done event with token usage statistics
     #[serde(rename = "done")]
     Done { usage: Option<TokenUsage> },
+
+    /// 最终完成（整个对话完成，包括所有工具调用循环）
+    /// 前端收到此事件后才能取消监听
+    #[serde(rename = "final_done")]
+    FinalDone { usage: Option<TokenUsage> },
 
     /// 错误
     /// Requirements: 1.4 - IF a streaming error occurs, THEN THE Streaming_Handler SHALL emit an error event

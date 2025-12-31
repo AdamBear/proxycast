@@ -11,10 +11,29 @@ const DialogContext = createContext<DialogContextType | undefined>(undefined);
 
 interface DialogProps {
   children: React.ReactNode;
+  /** 受控模式：是否打开 */
+  open?: boolean;
+  /** 受控模式：打开状态变化回调 */
+  onOpenChange?: (open: boolean) => void;
 }
 
-const Dialog: React.FC<DialogProps> = ({ children }) => {
-  const [open, setOpen] = useState(false);
+const Dialog: React.FC<DialogProps> = ({
+  children,
+  open: controlledOpen,
+  onOpenChange,
+}) => {
+  const [internalOpen, setInternalOpen] = useState(false);
+
+  // 支持受控和非受控模式
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : internalOpen;
+
+  const setOpen = (newOpen: boolean) => {
+    if (!isControlled) {
+      setInternalOpen(newOpen);
+    }
+    onOpenChange?.(newOpen);
+  };
 
   return (
     <DialogContext.Provider value={{ open, setOpen }}>

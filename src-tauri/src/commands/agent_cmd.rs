@@ -2,7 +2,7 @@
 //!
 //! 提供原生 Agent 的 Tauri 命令（兼容旧 API）
 
-use crate::agent::{ImageData, NativeAgentState, NativeChatRequest};
+use crate::agent::{ImageData, NativeAgentState, NativeChatRequest, ProviderType};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -34,12 +34,13 @@ pub async fn agent_start_process(
 ) -> Result<AgentProcessStatus, String> {
     tracing::info!("[Agent] 初始化原生 Agent");
 
-    let (port, api_key, running) = {
+    let (port, api_key, running, default_provider) = {
         let state = app_state.read().await;
         (
             state.config.server.port,
             state.running_api_key.clone(),
             state.running,
+            state.config.routing.default_provider.clone(),
         )
     };
 
@@ -49,8 +50,9 @@ pub async fn agent_start_process(
 
     let api_key = api_key.ok_or_else(|| "ProxyCast API Server 未配置 API Key".to_string())?;
     let base_url = format!("http://127.0.0.1:{}", port);
+    let provider_type = ProviderType::from_str(&default_provider);
 
-    agent_state.init(base_url.clone(), api_key)?;
+    agent_state.init(base_url.clone(), api_key, provider_type)?;
 
     Ok(AgentProcessStatus {
         running: true,
@@ -118,12 +120,13 @@ pub async fn agent_create_session(
 
     // 如果未初始化，自动初始化
     if !agent_state.is_initialized() {
-        let (port, api_key, running) = {
+        let (port, api_key, running, default_provider) = {
             let state = app_state.read().await;
             (
                 state.config.server.port,
                 state.running_api_key.clone(),
                 state.running,
+                state.config.routing.default_provider.clone(),
             )
         };
 
@@ -133,7 +136,8 @@ pub async fn agent_create_session(
 
         let api_key = api_key.ok_or_else(|| "未配置 API Key".to_string())?;
         let base_url = format!("http://127.0.0.1:{}", port);
-        agent_state.init(base_url, api_key)?;
+        let provider_type = ProviderType::from_str(&default_provider);
+        agent_state.init(base_url, api_key, provider_type)?;
     }
 
     // 构建包含 Skills 的 System Prompt
@@ -222,12 +226,13 @@ pub async fn agent_send_message(
 
     // 如果未初始化，自动初始化
     if !agent_state.is_initialized() {
-        let (port, api_key, running) = {
+        let (port, api_key, running, default_provider) = {
             let state = app_state.read().await;
             (
                 state.config.server.port,
                 state.running_api_key.clone(),
                 state.running,
+                state.config.routing.default_provider.clone(),
             )
         };
 
@@ -237,7 +242,8 @@ pub async fn agent_send_message(
 
         let api_key = api_key.ok_or_else(|| "未配置 API Key".to_string())?;
         let base_url = format!("http://127.0.0.1:{}", port);
-        agent_state.init(base_url, api_key)?;
+        let provider_type = ProviderType::from_str(&default_provider);
+        agent_state.init(base_url, api_key, provider_type)?;
     }
 
     // 根据启用的模式构建最终消息

@@ -160,6 +160,15 @@ impl ToolRegistry {
         self.tools.read().values().map(|t| t.definition()).collect()
     }
 
+    /// 获取所有工具定义（OpenAI API 格式）
+    pub fn list_definitions_api(&self) -> Vec<crate::models::openai::Tool> {
+        self.tools
+            .read()
+            .values()
+            .map(|t| t.definition().to_api_format())
+            .collect()
+    }
+
     /// 获取所有工具名称
     pub fn list_names(&self) -> Vec<String> {
         self.tools.read().keys().cloned().collect()

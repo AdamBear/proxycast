@@ -501,6 +501,7 @@ mod base64 {
 }
 
 pub use self::base64::decode as base64_decode;
+#[allow(unused_imports)]
 pub use self::base64::encode as base64_encode;
 
 #[cfg(test)]

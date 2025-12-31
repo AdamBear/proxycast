@@ -5,19 +5,37 @@ export interface MessageImage {
   mediaType: string;
 }
 
+/**
+ * 内容片段类型（用于交错显示）
+ *
+ * 参考 goose 框架的 MessageContent 设计：
+ * - text: 文本内容片段
+ * - tool_use: 工具调用（包含状态和结果）
+ */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; toolCall: ToolCallState };
+
 export interface Message {
   id: string;
   role: "user" | "assistant";
+  /** 完整文本内容（向后兼容） */
   content: string;
   images?: MessageImage[];
   timestamp: Date;
   isThinking?: boolean;
   thinkingContent?: string;
   search_results?: any[]; // For potential future use
-  /** 工具调用列表（assistant 消息可能包含） */
+  /** 工具调用列表（assistant 消息可能包含） - 向后兼容 */
   toolCalls?: ToolCallState[];
   /** Token 使用量（响应完成后） */
   usage?: TokenUsage;
+  /**
+   * 交错内容列表（按事件到达顺序排列）
+   * 如果存在且非空，StreamingRenderer 会按顺序渲染
+   * 否则回退到 content + toolCalls 渲染方式
+   */
+  contentParts?: ContentPart[];
 }
 
 export interface ChatSession {

@@ -44,6 +44,7 @@ export type StreamEvent =
   | StreamEventToolStart
   | StreamEventToolEnd
   | StreamEventDone
+  | StreamEventFinalDone
   | StreamEventError;
 
 /**
@@ -65,6 +66,8 @@ export interface StreamEventToolStart {
   tool_name: string;
   /** 工具调用 ID */
   tool_id: string;
+  /** 工具参数（JSON 字符串） */
+  arguments?: string;
 }
 
 /**
@@ -80,11 +83,21 @@ export interface StreamEventToolEnd {
 }
 
 /**
- * 完成事件
+ * 完成事件（单次 API 响应完成，工具循环可能继续）
  * Requirements: 9.5 - THE Frontend SHALL display token usage statistics after each Agent response
  */
 export interface StreamEventDone {
   type: "done";
+  /** Token 使用量（可选） */
+  usage?: TokenUsage;
+}
+
+/**
+ * 最终完成事件（整个对话完成，包括所有工具调用循环）
+ * 前端收到此事件后才能取消监听
+ */
+export interface StreamEventFinalDone {
+  type: "final_done";
   /** Token 使用量（可选） */
   usage?: TokenUsage;
 }
@@ -106,6 +119,8 @@ export interface ToolCallState {
   id: string;
   /** 工具名称 */
   name: string;
+  /** 工具参数（JSON 字符串） */
+  arguments?: string;
   /** 执行状态 */
   status: "running" | "completed" | "failed";
   /** 执行结果（完成后） */
@@ -114,6 +129,8 @@ export interface ToolCallState {
   startTime: Date;
   /** 结束时间（完成后） */
   endTime?: Date;
+  /** 执行日志（实时更新） */
+  logs?: string[];
 }
 
 /**
@@ -138,6 +155,7 @@ export function parseStreamEvent(data: unknown): StreamEvent | null {
         type: "tool_start",
         tool_name: (event.tool_name as string) || "",
         tool_id: (event.tool_id as string) || "",
+        arguments: event.arguments as string | undefined,
       };
     case "tool_end":
       return {
@@ -148,6 +166,11 @@ export function parseStreamEvent(data: unknown): StreamEvent | null {
     case "done":
       return {
         type: "done",
+        usage: event.usage as TokenUsage | undefined,
+      };
+    case "final_done":
+      return {
+        type: "final_done",
         usage: event.usage as TokenUsage | undefined,
       };
     case "error":
@@ -280,18 +303,20 @@ export async function sendAgentMessage(
  *     // 处理文本增量
  *   }
  * });
- * await sendAgentMessageStream(message, eventName);
+ * await sendAgentMessageStream(message, eventName, sessionId);
  * ```
  */
 export async function sendAgentMessageStream(
   message: string,
   eventName: string,
+  sessionId?: string,
   model?: string,
   images?: ImageInput[],
 ): Promise<void> {
   return await invoke("native_agent_chat_stream", {
     message,
     eventName,
+    sessionId,
     model,
     images,
   });

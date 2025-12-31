@@ -10,6 +10,7 @@ React 自定义 Hooks，封装业务逻辑和状态管理。
 ## 文件索引
 
 - `index.ts` - Hooks 导出入口
+- `useApiKeyProvider.ts` - API Key Provider 管理 Hook（Requirements 9.1）
 - `useErrorHandler.ts` - 错误处理 Hook
 - `useFileMonitoring.ts` - 文件监控 Hook
 - `useFlowActions.ts` - 流量操作 Hook

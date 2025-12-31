@@ -48,6 +48,17 @@ impl ToolDefinition {
         self.parameters.validate()?;
         Ok(())
     }
+
+    /// 转换为 OpenAI API 格式的工具定义
+    pub fn to_api_format(&self) -> crate::models::openai::Tool {
+        crate::models::openai::Tool::Function {
+            function: crate::models::openai::FunctionDef {
+                name: self.name.clone(),
+                description: Some(self.description.clone()),
+                parameters: Some(serde_json::to_value(&self.parameters).unwrap_or_default()),
+            },
+        }
+    }
 }
 
 /// JSON Schema 参数定义

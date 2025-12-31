@@ -14,7 +14,7 @@ import {
   type SessionInfo,
   type StreamEvent,
 } from "@/lib/api/agent";
-import { Message, MessageImage, PROVIDER_CONFIG } from "../types";
+import { Message, MessageImage, ContentPart, PROVIDER_CONFIG } from "../types";
 
 /** 话题（会话）信息 */
 export interface Topic {
@@ -234,6 +234,7 @@ export function useAgentChat() {
       timestamp: new Date(),
       isThinking: true,
       thinkingContent: thinkingText,
+      contentParts: [], // 初始化交错内容列表
     };
 
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -243,12 +244,46 @@ export function useAgentChat() {
     let accumulatedContent = "";
     let unlisten: UnlistenFn | null = null;
 
+    /**
+     * 辅助函数：更新 contentParts，支持交错显示
+     * - text_delta: 追加到最后一个 text 类型，或创建新的 text 类型
+     * - tool_start: 添加新的 tool_use 类型
+     * - tool_end: 更新对应的 tool_use 状态
+     */
+    const appendTextToParts = (
+      parts: ContentPart[],
+      text: string,
+    ): ContentPart[] => {
+      const newParts = [...parts];
+      const lastPart = newParts[newParts.length - 1];
+
+      if (lastPart && lastPart.type === "text") {
+        // 追加到最后一个 text 类型
+        newParts[newParts.length - 1] = {
+          type: "text",
+          text: lastPart.text + text,
+        };
+      } else {
+        // 创建新的 text 类型
+        newParts.push({ type: "text", text });
+      }
+      return newParts;
+    };
+
     try {
-      // 2. 创建唯一事件名称（流式 API 不需要 session）
+      // 2. 确保有一个活跃的 session（用于保持上下文）
+      const activeSessionId = await _ensureSession();
+      if (!activeSessionId) {
+        throw new Error("无法创建或获取会话");
+      }
+
+      // 3. 创建唯一事件名称
       const eventName = `agent_stream_${assistantMsgId}`;
 
       // 4. 设置事件监听器（流式接收）
-      console.log(`[AgentChat] 设置事件监听器: ${eventName}`);
+      console.log(
+        `[AgentChat] 设置事件监听器: ${eventName}, sessionId: ${activeSessionId}`,
+      );
       unlisten = await listen<StreamEvent>(eventName, (event) => {
         console.log("[AgentChat] 收到事件:", eventName, event.payload);
         const data = parseStreamEvent(event.payload);
@@ -260,7 +295,7 @@ export function useAgentChat() {
 
         switch (data.type) {
           case "text_delta":
-            // 累积文本并实时更新 UI
+            // 累积文本并实时更新 UI（同时更新 content 和 contentParts）
             accumulatedContent += data.text;
             setMessages((prev) =>
               prev.map((msg) =>
@@ -269,6 +304,11 @@ export function useAgentChat() {
                       ...msg,
                       content: accumulatedContent,
                       thinkingContent: undefined,
+                      // 更新 contentParts，支持交错显示
+                      contentParts: appendTextToParts(
+                        msg.contentParts || [],
+                        data.text,
+                      ),
                     }
                   : msg,
               ),
@@ -276,7 +316,27 @@ export function useAgentChat() {
             break;
 
           case "done":
-            // 完成，标记 isThinking 为 false
+            // 完成一次 API 响应，但工具循环可能还在继续
+            // 不要取消监听，继续等待更多事件
+            console.log("[AgentChat] 收到 done 事件，工具循环可能还在继续...");
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === assistantMsgId
+                  ? {
+                      ...msg,
+                      // 保持 isThinking 为 true，直到收到 final_done 或 error
+                      content: accumulatedContent || msg.content,
+                    }
+                  : msg,
+              ),
+            );
+            // 注意：不要在这里 setIsSending(false) 或 unlisten()
+            // 工具循环会继续发送事件
+            break;
+
+          case "final_done":
+            // 整个对话完成（包括所有工具调用）
+            console.log("[AgentChat] 收到 final_done 事件，对话完成");
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMsgId
@@ -316,58 +376,91 @@ export function useAgentChat() {
             }
             break;
 
-          case "tool_start":
-            // 工具开始执行 - 添加到工具调用列表
+          case "tool_start": {
+            // 工具开始执行 - 添加到工具调用列表和 contentParts
             console.log(`[Tool Start] ${data.tool_name} (${data.tool_id})`);
+            const newToolCall = {
+              id: data.tool_id,
+              name: data.tool_name,
+              arguments: data.arguments,
+              status: "running" as const,
+              startTime: new Date(),
+            };
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMsgId
                   ? {
                       ...msg,
-                      toolCalls: [
-                        ...(msg.toolCalls || []),
-                        {
-                          id: data.tool_id,
-                          name: data.tool_name,
-                          status: "running" as const,
-                          startTime: new Date(),
-                        },
+                      toolCalls: [...(msg.toolCalls || []), newToolCall],
+                      // 添加到 contentParts，支持交错显示
+                      contentParts: [
+                        ...(msg.contentParts || []),
+                        { type: "tool_use" as const, toolCall: newToolCall },
                       ],
                     }
                   : msg,
               ),
             );
             break;
+          }
 
-          case "tool_end":
-            // 工具执行完成 - 更新工具调用状态
+          case "tool_end": {
+            // 工具执行完成 - 更新工具调用状态和 contentParts
             console.log(`[Tool End] ${data.tool_id}`);
             setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === assistantMsgId
-                  ? {
-                      ...msg,
-                      toolCalls: (msg.toolCalls || []).map((tc) =>
-                        tc.id === data.tool_id
-                          ? {
-                              ...tc,
-                              status: data.result.success
-                                ? ("completed" as const)
-                                : ("failed" as const),
-                              result: data.result,
-                              endTime: new Date(),
-                            }
-                          : tc,
-                      ),
+              prev.map((msg) => {
+                if (msg.id !== assistantMsgId) return msg;
+
+                // 更新 toolCalls
+                const updatedToolCalls = (msg.toolCalls || []).map((tc) =>
+                  tc.id === data.tool_id
+                    ? {
+                        ...tc,
+                        status: data.result.success
+                          ? ("completed" as const)
+                          : ("failed" as const),
+                        result: data.result,
+                        endTime: new Date(),
+                      }
+                    : tc,
+                );
+
+                // 更新 contentParts 中对应的 tool_use
+                const updatedContentParts = (msg.contentParts || []).map(
+                  (part) => {
+                    if (
+                      part.type === "tool_use" &&
+                      part.toolCall.id === data.tool_id
+                    ) {
+                      return {
+                        ...part,
+                        toolCall: {
+                          ...part.toolCall,
+                          status: data.result.success
+                            ? ("completed" as const)
+                            : ("failed" as const),
+                          result: data.result,
+                          endTime: new Date(),
+                        },
+                      };
                     }
-                  : msg,
-              ),
+                    return part;
+                  },
+                );
+
+                return {
+                  ...msg,
+                  toolCalls: updatedToolCalls,
+                  contentParts: updatedContentParts,
+                };
+              }),
             );
             break;
+          }
         }
       });
 
-      // 5. 发送流式请求
+      // 5. 发送流式请求（传递 sessionId 以保持上下文）
       const imagesToSend =
         images.length > 0
           ? images.map((img) => ({ data: img.data, media_type: img.mediaType }))
@@ -376,6 +469,7 @@ export function useAgentChat() {
       await sendAgentMessageStream(
         content,
         eventName,
+        activeSessionId, // 传递 sessionId 以保持上下文
         model || undefined,
         imagesToSend,
       );

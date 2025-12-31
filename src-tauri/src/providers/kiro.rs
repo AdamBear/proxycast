@@ -2,9 +2,12 @@
 
 #![allow(dead_code)]
 
-use crate::converter::openai_to_cw::convert_openai_to_codewhisperer;
+// 使用新的 translator 模块替代旧的 converter
+use crate::models::anthropic::AnthropicMessagesRequest;
 use crate::models::openai::*;
 use crate::providers::traits::{CredentialProvider, ProviderResult};
+use crate::translator::kiro::anthropic::request::convert_anthropic_to_codewhisperer;
+use crate::translator::kiro::openai::request::convert_openai_to_codewhisperer;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -1224,5 +1227,92 @@ impl StreamingProvider for KiroProvider {
 
     fn stream_format(&self) -> StreamFormat {
         StreamFormat::AwsEventStream
+    }
+}
+
+// ============================================================================
+// Anthropic 格式直接支持
+// ============================================================================
+
+impl KiroProvider {
+    /// 直接处理 Anthropic 格式的流式请求
+    ///
+    /// 绕过 OpenAI 中间格式，直接从 Anthropic → CodeWhisperer
+    /// 这样可以保留 Anthropic 特有的字段（如 tool_choice）
+    pub async fn call_api_stream_anthropic(
+        &self,
+        request: &AnthropicMessagesRequest,
+    ) -> Result<StreamResponse, ProviderError> {
+        let token = self
+            .credentials
+            .access_token
+            .as_ref()
+            .ok_or_else(|| ProviderError::AuthenticationError("No access token".to_string()))?;
+
+        let profile_arn = if self.credentials.auth_method.as_deref() == Some("social") {
+            self.credentials.profile_arn.clone()
+        } else {
+            None
+        };
+
+        // 直接转换 Anthropic → CodeWhisperer（不经过 OpenAI）
+        let cw_request = convert_anthropic_to_codewhisperer(request, profile_arn.clone());
+        let url = self.get_base_url();
+
+        // 生成基于凭证的唯一 Machine ID
+        let machine_id = generate_machine_id_from_credentials(
+            profile_arn.as_deref(),
+            self.credentials.client_id.as_deref(),
+        );
+        let kiro_version = get_kiro_version();
+        let (os_name, node_version) = get_system_runtime_info();
+
+        tracing::info!(
+            "[KIRO_STREAM_ANTHROPIC] 直接 Anthropic→CodeWhisperer 流式请求: url={} machine_id={}...",
+            url,
+            &machine_id[..16]
+        );
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/vnd.amazon.eventstream")
+            .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+            .header("amz-sdk-request", "attempt=1; max=1")
+            .header("x-amzn-kiro-agent-mode", "vibe")
+            .header(
+                "x-amz-user-agent",
+                format!("aws-sdk-js/1.0.0 KiroIDE-{kiro_version}-{machine_id}"),
+            )
+            .header(
+                "user-agent",
+                format!(
+                    "aws-sdk-js/1.0.0 ua/2.1 os/{os_name} lang/js md/nodejs#{node_version} api/codewhispererruntime#1.0.0 m/E KiroIDE-{kiro_version}-{machine_id}"
+                ),
+            )
+            .json(&cw_request)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("[KIRO_STREAM_ANTHROPIC] 请求发送失败: {}", e);
+                ProviderError::from_reqwest_error(&e)
+            })?;
+
+        tracing::info!("[KIRO_STREAM_ANTHROPIC] 收到响应: status={}", resp.status());
+
+        // 检查响应状态
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!("[KIRO_STREAM_ANTHROPIC] 请求失败: {} - {}", status, body);
+            return Err(ProviderError::from_http_status(status.as_u16(), &body));
+        }
+
+        tracing::info!("[KIRO_STREAM_ANTHROPIC] 流式响应开始: status={}", status);
+
+        // 将 reqwest 响应转换为 StreamResponse
+        Ok(reqwest_stream_to_stream_response(resp))
     }
 }

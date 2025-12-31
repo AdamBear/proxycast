@@ -1,3 +1,4 @@
+pub mod api_key_provider_service;
 pub mod backup_service;
 pub mod kiro_event_service;
 pub mod live_sync;

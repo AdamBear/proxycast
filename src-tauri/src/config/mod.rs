@@ -3,6 +3,8 @@
 //! 提供 YAML 配置文件支持、热重载和配置导入导出功能
 //! 同时保持与旧版 JSON 配置的向后兼容性
 
+#![allow(unused_imports)]
+
 mod export;
 mod hot_reload;
 mod import;

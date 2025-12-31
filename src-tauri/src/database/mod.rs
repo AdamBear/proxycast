@@ -1,6 +1,7 @@
 pub mod dao;
 pub mod migration;
 pub mod schema;
+pub mod system_providers;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -25,6 +26,18 @@ pub fn init_database() -> Result<DbConnection, String> {
     // 创建表结构
     schema::create_tables(&conn).map_err(|e| e.to_string())?;
     migration::migrate_from_json(&conn)?;
+
+    // 执行 API Keys 到 Provider Pool 的迁移
+    match migration::migrate_api_keys_to_pool(&conn) {
+        Ok(count) => {
+            if count > 0 {
+                tracing::info!("[数据库] 已将 {} 条 API Key 迁移到凭证池", count);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("[数据库] API Key 迁移失败（非致命）: {}", e);
+        }
+    }
 
     Ok(Arc::new(Mutex::new(conn)))
 }

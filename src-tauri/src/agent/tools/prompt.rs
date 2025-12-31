@@ -49,11 +49,18 @@ impl ToolPromptGenerator {
         self
     }
 
-    /// 生成包含工具定义的 System Prompt
+    /// 生成包含工具使用指导的 System Prompt
     ///
-    /// Requirements: 2.3 - THE System_Prompt SHALL include all available tool definitions
-    /// in a format the LLM can understand
-    pub fn generate_system_prompt(&self, tools: &[ToolDefinition]) -> String {
+    /// 注意：工具定义已通过 API 的 tools 字段发送，不需要在 system prompt 中重复
+    /// 此方法只返回工具使用指导
+    pub fn generate_system_prompt(&self, _tools: &[ToolDefinition]) -> String {
+        // 只返回使用指导，工具定义由 API 原生处理
+        TOOL_USAGE_INSTRUCTIONS.to_string()
+    }
+
+    /// 生成包含工具定义的完整 System Prompt（旧版本，保留兼容性）
+    #[allow(dead_code)]
+    pub fn generate_full_system_prompt(&self, tools: &[ToolDefinition]) -> String {
         match self.format {
             PromptFormat::Xml => self.generate_xml_prompt(tools),
             PromptFormat::Json => self.generate_json_prompt(tools),
@@ -177,25 +184,38 @@ impl ToolPromptGenerator {
     }
 }
 
-/// 工具使用说明模板
-const TOOL_USAGE_INSTRUCTIONS: &str = r#"You have access to a set of tools that you can use to help accomplish tasks. When you need to use a tool, respond with a tool call in the following format:
+/// 工具使用说明模板（适合桌面软件）
+const TOOL_USAGE_INSTRUCTIONS: &str = r#"你是一个友好的 AI 助手。
 
-<tool_call>
-<name>tool_name</name>
-<arguments>
-{
-  "param1": "value1",
-  "param2": "value2"
-}
-</arguments>
-</tool_call>
+# 核心原则
 
-Important guidelines for tool usage:
-1. Only use tools when necessary to accomplish the task
-2. Provide all required parameters for each tool call
-3. Wait for tool results before making additional tool calls that depend on them
-4. If a tool call fails, analyze the error and try an alternative approach
-5. Always explain your reasoning before and after using tools"#;
+1. **自然交流**：对于问候、闲聊、问答，直接用文字回复，不要调用任何工具
+2. **显式授权**：只有当用户**明确提供**文件路径或目录时，才能操作
+3. **不要主动探索**：不要自作主张读取目录或文件来"了解环境"
+
+# 可用工具
+
+- **read_file**：读取用户指定的文件或目录
+- **write_file**：创建/覆盖用户指定的文件
+- **edit_file**：修改用户指定的文件
+- **bash**：执行用户要求的命令
+
+# 重要限制
+
+⚠️ **禁止行为**：
+- 用户说"你好"时，不要读取任何文件
+- 用户没有给路径时，不要自己猜测或使用 "."
+- 不要为了"打招呼"或"了解用户"而调用工具
+
+✅ **正确做法**：
+- 用户说"你好" → 直接回复问候
+- 用户说"看看 /path/to/file" → 调用 read_file
+- 用户说"列出目录内容" → 询问用户要查看哪个目录
+
+# 输出格式
+- 使用 Markdown 格式
+- 简洁明了
+- 使用中文回复"#;
 
 /// XML 特殊字符转义
 fn escape_xml(s: &str) -> String {
@@ -305,13 +325,25 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_xml_prompt() {
-        let generator = ToolPromptGenerator::new().with_format(PromptFormat::Xml);
+    fn test_generate_system_prompt() {
+        let generator = ToolPromptGenerator::new();
         let tools = create_test_tools();
         let prompt = generator.generate_system_prompt(&tools);
 
+        // 验证包含工具使用说明（新版本只返回指导，不包含工具定义）
+        assert!(prompt.contains("你是一个友好的 AI 助手"));
+        assert!(prompt.contains("可用工具"));
+        assert!(prompt.contains("read_file")); // 在说明中提到
+    }
+
+    #[test]
+    fn test_generate_full_xml_prompt() {
+        let generator = ToolPromptGenerator::new().with_format(PromptFormat::Xml);
+        let tools = create_test_tools();
+        let prompt = generator.generate_full_system_prompt(&tools);
+
         // 验证包含工具使用说明
-        assert!(prompt.contains("You have access to a set of tools"));
+        assert!(prompt.contains("可用工具"));
         // 验证包含 tools 标签
         assert!(prompt.contains("<tools>"));
         assert!(prompt.contains("</tools>"));
@@ -321,13 +353,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_json_prompt() {
+    fn test_generate_full_json_prompt() {
         let generator = ToolPromptGenerator::new().with_format(PromptFormat::Json);
         let tools = create_test_tools();
-        let prompt = generator.generate_system_prompt(&tools);
+        let prompt = generator.generate_full_system_prompt(&tools);
 
         // 验证包含工具使用说明
-        assert!(prompt.contains("You have access to a set of tools"));
+        assert!(prompt.contains("可用工具"));
         // 验证包含 JSON 代码块
         assert!(prompt.contains("```json"));
         // 验证包含所有工具
@@ -339,11 +371,9 @@ mod tests {
     fn test_generate_tools_prompt_convenience_function() {
         let tools = create_test_tools();
 
-        let xml_prompt = generate_tools_prompt(&tools, PromptFormat::Xml);
-        assert!(xml_prompt.contains("<tools>"));
-
-        let json_prompt = generate_tools_prompt(&tools, PromptFormat::Json);
-        assert!(json_prompt.contains("```json"));
+        // generate_tools_prompt 使用 generate_system_prompt，只返回指导
+        let prompt = generate_tools_prompt(&tools, PromptFormat::Xml);
+        assert!(prompt.contains("可用工具"));
     }
 
     #[test]
@@ -361,9 +391,8 @@ mod tests {
         let prompt = generator.generate_system_prompt(&[]);
 
         // 即使没有工具，也应该包含使用说明
-        assert!(prompt.contains("You have access to a set of tools"));
-        assert!(prompt.contains("<tools>"));
-        assert!(prompt.contains("</tools>"));
+        assert!(prompt.contains("你是一个友好的 AI 助手"));
+        assert!(prompt.contains("可用工具"));
     }
 
     #[test]
@@ -399,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_contains_all_tool_names_and_descriptions() {
+    fn test_full_prompt_contains_all_tool_names_and_descriptions() {
         let tools = vec![
             ToolDefinition::new("tool_a", "Description for tool A"),
             ToolDefinition::new("tool_b", "Description for tool B"),
@@ -407,7 +436,8 @@ mod tests {
         ];
 
         let generator = ToolPromptGenerator::new();
-        let prompt = generator.generate_system_prompt(&tools);
+        // 使用 generate_full_system_prompt 来包含工具定义
+        let prompt = generator.generate_full_system_prompt(&tools);
 
         // 验证所有工具名称都在 prompt 中
         for tool in &tools {
@@ -494,14 +524,14 @@ mod proptests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
-        /// **Feature: agent-tool-calling, Property 3: System Prompt 工具包含**
+        /// **Feature: agent-tool-calling, Property 3: Full System Prompt 工具包含**
         /// **Validates: Requirements 2.3**
         ///
-        /// *For any* 已注册的工具集合，生成的 System Prompt 应该包含所有工具的 name 和 description。
+        /// *For any* 已注册的工具集合，生成的完整 System Prompt 应该包含所有工具的 name 和 description。
         #[test]
-        fn prop_system_prompt_contains_all_tool_names(tools in arb_tool_definitions()) {
+        fn prop_full_system_prompt_contains_all_tool_names(tools in arb_tool_definitions()) {
             let generator = ToolPromptGenerator::new().with_format(PromptFormat::Xml);
-            let prompt = generator.generate_system_prompt(&tools);
+            let prompt = generator.generate_full_system_prompt(&tools);
 
             // 验证所有工具名称都在 prompt 中
             for tool in &tools {
@@ -514,14 +544,14 @@ mod proptests {
             }
         }
 
-        /// **Feature: agent-tool-calling, Property 3: System Prompt 工具包含 - 描述**
+        /// **Feature: agent-tool-calling, Property 3: Full System Prompt 工具包含 - 描述**
         /// **Validates: Requirements 2.3**
         ///
-        /// *For any* 已注册的工具集合，生成的 System Prompt 应该包含所有工具的 description。
+        /// *For any* 已注册的工具集合，生成的完整 System Prompt 应该包含所有工具的 description。
         #[test]
-        fn prop_system_prompt_contains_all_tool_descriptions(tools in arb_tool_definitions()) {
+        fn prop_full_system_prompt_contains_all_tool_descriptions(tools in arb_tool_definitions()) {
             let generator = ToolPromptGenerator::new().with_format(PromptFormat::Xml);
-            let prompt = generator.generate_system_prompt(&tools);
+            let prompt = generator.generate_full_system_prompt(&tools);
 
             // 验证所有工具描述都在 prompt 中
             for tool in &tools {
@@ -534,14 +564,14 @@ mod proptests {
             }
         }
 
-        /// **Feature: agent-tool-calling, Property 3: System Prompt 工具包含 - JSON 格式**
+        /// **Feature: agent-tool-calling, Property 3: Full System Prompt 工具包含 - JSON 格式**
         /// **Validates: Requirements 2.3**
         ///
-        /// *For any* 已注册的工具集合，JSON 格式的 System Prompt 也应该包含所有工具的 name 和 description。
+        /// *For any* 已注册的工具集合，JSON 格式的完整 System Prompt 也应该包含所有工具的 name 和 description。
         #[test]
-        fn prop_system_prompt_json_contains_all_tools(tools in arb_tool_definitions()) {
+        fn prop_full_system_prompt_json_contains_all_tools(tools in arb_tool_definitions()) {
             let generator = ToolPromptGenerator::new().with_format(PromptFormat::Json);
-            let prompt = generator.generate_system_prompt(&tools);
+            let prompt = generator.generate_full_system_prompt(&tools);
 
             // 验证所有工具名称和描述都在 prompt 中
             for tool in &tools {
@@ -560,18 +590,18 @@ mod proptests {
             }
         }
 
-        /// **Feature: agent-tool-calling, Property 3: System Prompt 工具包含 - 格式一致性**
+        /// **Feature: agent-tool-calling, Property 3: Full System Prompt 工具包含 - 格式一致性**
         /// **Validates: Requirements 2.3**
         ///
         /// *For any* 已注册的工具集合，无论使用 XML 还是 JSON 格式，
-        /// 生成的 System Prompt 都应该包含相同的工具信息。
+        /// 生成的完整 System Prompt 都应该包含相同的工具信息。
         #[test]
-        fn prop_system_prompt_format_consistency(tools in arb_tool_definitions()) {
+        fn prop_full_system_prompt_format_consistency(tools in arb_tool_definitions()) {
             let xml_generator = ToolPromptGenerator::new().with_format(PromptFormat::Xml);
             let json_generator = ToolPromptGenerator::new().with_format(PromptFormat::Json);
 
-            let xml_prompt = xml_generator.generate_system_prompt(&tools);
-            let json_prompt = json_generator.generate_system_prompt(&tools);
+            let xml_prompt = xml_generator.generate_full_system_prompt(&tools);
+            let json_prompt = json_generator.generate_full_system_prompt(&tools);
 
             // 两种格式都应该包含所有工具名称和描述
             for tool in &tools {
@@ -588,15 +618,15 @@ mod proptests {
             }
         }
 
-        /// **Feature: agent-tool-calling, Property 3: System Prompt 工具包含 - 工具数量**
+        /// **Feature: agent-tool-calling, Property 3: Full System Prompt 工具包含 - 工具数量**
         /// **Validates: Requirements 2.3**
         ///
-        /// *For any* 已注册的工具集合，生成的 System Prompt 中工具名称出现的次数
+        /// *For any* 已注册的工具集合，生成的完整 System Prompt 中工具名称出现的次数
         /// 应该至少等于工具数量（每个工具至少出现一次）。
         #[test]
-        fn prop_system_prompt_tool_count(tools in arb_tool_definitions()) {
+        fn prop_full_system_prompt_tool_count(tools in arb_tool_definitions()) {
             let generator = ToolPromptGenerator::new().with_format(PromptFormat::Xml);
-            let prompt = generator.generate_system_prompt(&tools);
+            let prompt = generator.generate_full_system_prompt(&tools);
 
             // 统计每个工具名称在 prompt 中出现的次数
             for tool in &tools {

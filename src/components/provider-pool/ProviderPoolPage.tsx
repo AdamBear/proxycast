@@ -1,4 +1,19 @@
-import { useState, useEffect, forwardRef, useImperativeHandle } from "react";
+/**
+ * @file ProviderPoolPage 组件
+ * @description 凭证池管理页面，支持 OAuth 凭证卡片布局和 API Key 左右分栏布局
+ * @module components/provider-pool/ProviderPoolPage
+ *
+ * **Feature: provider-ui-refactor**
+ * **Validates: Requirements 1.1, 2.1, 2.2, 2.3**
+ */
+
+import {
+  useState,
+  useEffect,
+  forwardRef,
+  useImperativeHandle,
+  useCallback,
+} from "react";
 import {
   RefreshCw,
   Plus,
@@ -9,6 +24,7 @@ import {
   Download,
 } from "lucide-react";
 import { useProviderPool } from "@/hooks/useProviderPool";
+import { useApiKeyProvider } from "@/hooks/useApiKeyProvider";
 import { CredentialCard } from "./CredentialCard";
 import { CredentialCardContextMenu } from "./CredentialCardContextMenu";
 import { AddCredentialModal } from "./AddCredentialModal";
@@ -19,6 +35,8 @@ import { getConfig, saveConfig, Config } from "@/hooks/useTauri";
 import { VertexAISection } from "./VertexAISection";
 import { AmpConfigSection } from "./AmpConfigSection";
 import { ProviderIcon } from "@/icons/providers";
+import { ApiKeyProviderSection, AddCustomProviderModal } from "./api-key";
+import type { AddCustomProviderRequest } from "@/lib/api/apiKeyProvider";
 import {
   getLocalKiroCredentialUuid,
   type PoolProviderType,
@@ -39,13 +57,6 @@ const oauthProviderTypes: PoolProviderType[] = [
   "codex",
   "claude_oauth",
   "iflow",
-];
-
-// API Key 类型凭证（直接填入 API Key）
-const apiKeyProviderTypes: PoolProviderType[] = [
-  "openai",
-  "claude",
-  "gemini_api_key",
 ];
 
 // 配置类型 tab（非凭证池，存储在配置文件中）
@@ -94,6 +105,10 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
     const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
     const { errors, showError, showSuccess, dismissError } = useErrorDisplay();
 
+    // 添加自定义 Provider 模态框状态
+    const [addCustomProviderModalOpen, setAddCustomProviderModalOpen] =
+      useState(false);
+
     const {
       overview,
       loading,
@@ -111,6 +126,10 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       updateCredential,
       migratePrivateConfig,
     } = useProviderPool();
+
+    // API Key Provider Hook
+    const { addCustomProvider, refresh: refreshApiKeyProviders } =
+      useApiKeyProvider();
 
     const [migrating, setMigrating] = useState(false);
 
@@ -148,13 +167,13 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       setConfigSaving(false);
     };
 
-    // 切换到配置 tab 或 apikey 分类时加载配置（apikey 分类包含 gemini_api）
+    // 切换到配置 tab 时加载配置
     useEffect(() => {
-      if (isConfigTab(activeTab) || activeCategory === "apikey") {
+      if (isConfigTab(activeTab)) {
         loadConfig();
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeTab, activeCategory]);
+    }, [activeTab]);
 
     // 获取本地活跃的 Kiro 凭证 UUID
     const fetchLocalActiveUuid = async () => {
@@ -173,10 +192,13 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       if (activeTab === "kiro") {
         fetchLocalActiveUuid();
       }
-    }, [activeTab, overview]); // 当切换到 Kiro tab 或凭证池数据变化时重新检测
+    }, [activeTab, overview]);
 
     useImperativeHandle(ref, () => ({
-      refresh,
+      refresh: () => {
+        refresh();
+        refreshApiKeyProviders();
+      },
     }));
 
     const handleDeleteClick = (uuid: string) => {
@@ -189,8 +211,6 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       setDeleteConfirm(null);
       setDeletingCredentials((prev) => new Set(prev).add(uuid));
       try {
-        // Pass activeTab (provider_type) to enable YAML config sync
-        // 只有凭证池 tab 才传递 provider_type
         const providerType = !isConfigTab(activeTab)
           ? (activeTab as PoolProviderType)
           : undefined;
@@ -333,10 +353,19 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
       return pool?.credentials?.length || 0;
     };
 
-    // Current tab data (仅用于凭证池 tab)
-    const currentPool = !isConfigTab(activeTab)
-      ? getProviderOverview(activeTab as PoolProviderType)
-      : null;
+    // 添加自定义 Provider 处理
+    const handleAddCustomProvider = useCallback(
+      async (request: AddCustomProviderRequest) => {
+        await addCustomProvider(request);
+      },
+      [addCustomProvider],
+    );
+
+    // Current tab data (仅用于 OAuth 凭证 tab)
+    const currentPool =
+      !isConfigTab(activeTab) && activeCategory === "oauth"
+        ? getProviderOverview(activeTab as PoolProviderType)
+        : null;
     const currentStats = currentPool?.stats;
     const currentCredentials = currentPool?.credentials || [];
 
@@ -381,19 +410,20 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                 ? "border-primary bg-primary/10 text-primary"
                 : "border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted"
             }`}
+            data-testid="oauth-category-tab"
           >
             OAuth 凭证
           </button>
           <button
             onClick={() => {
               setActiveCategory("apikey");
-              setActiveTab(apiKeyProviderTypes[0]);
             }}
             className={`px-4 py-2 text-sm font-medium rounded-lg border transition-colors ${
               activeCategory === "apikey"
                 ? "border-primary bg-primary/10 text-primary"
                 : "border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted"
             }`}
+            data-testid="apikey-category-tab"
           >
             API Key
           </button>
@@ -407,12 +437,13 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                 ? "border-primary bg-primary/10 text-primary"
                 : "border-border bg-card text-muted-foreground hover:text-foreground hover:bg-muted"
             }`}
+            data-testid="config-category-tab"
           >
             其他配置
           </button>
         </div>
 
-        {/* Provider Selection - 第二行：图标网格选择 */}
+        {/* OAuth 凭证分类 - Provider 选择图标网格 */}
         {activeCategory === "oauth" && (
           <div className="flex flex-wrap gap-2">
             {oauthProviderTypes.map((providerType) => {
@@ -428,6 +459,7 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                       ? "border-primary bg-primary/10 text-primary shadow-sm"
                       : "border-border bg-card hover:border-primary/50 hover:bg-muted text-muted-foreground hover:text-foreground"
                   }`}
+                  data-testid={`oauth-provider-${providerType}`}
                 >
                   <ProviderIcon providerType={providerType} size={20} />
                   <span className="text-sm font-medium">
@@ -440,6 +472,7 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                           ? "bg-primary text-primary-foreground"
                           : "bg-muted-foreground/20 text-muted-foreground group-hover:bg-primary/20 group-hover:text-primary"
                       }`}
+                      data-testid={`oauth-credential-count-${providerType}`}
                     >
                       {count}
                     </span>
@@ -449,42 +482,8 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
             })}
           </div>
         )}
-        {activeCategory === "apikey" && (
-          <div className="flex flex-wrap gap-2">
-            {apiKeyProviderTypes.map((providerType) => {
-              const count = getCredentialCount(providerType);
-              const isActive = activeTab === providerType;
-              return (
-                <button
-                  key={providerType}
-                  onClick={() => setActiveTab(providerType)}
-                  title={providerLabels[providerType]}
-                  className={`group relative flex items-center justify-center gap-2 min-w-[120px] px-3 py-2 rounded-lg border transition-all ${
-                    isActive
-                      ? "border-primary bg-primary/10 text-primary shadow-sm"
-                      : "border-border bg-card hover:border-primary/50 hover:bg-muted text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  <ProviderIcon providerType={providerType} size={20} />
-                  <span className="text-sm font-medium">
-                    {providerLabels[providerType].split(" ")[0]}
-                  </span>
-                  {count > 0 && (
-                    <span
-                      className={`min-w-[1.25rem] h-5 flex items-center justify-center rounded-full text-xs font-medium ${
-                        isActive
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted-foreground/20 text-muted-foreground group-hover:bg-primary/20 group-hover:text-primary"
-                      }`}
-                    >
-                      {count}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        )}
+
+        {/* 其他配置分类 - 配置 Tab 选择 */}
         {activeCategory === "config" && (
           <div className="flex flex-wrap gap-2">
             {(["vertex", "amp"] as const).map((tabId) => {
@@ -498,6 +497,7 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
                       ? "border-primary bg-primary/10 text-primary shadow-sm"
                       : "border-border bg-card hover:border-primary/50 hover:bg-muted text-muted-foreground hover:text-foreground"
                   }`}
+                  data-testid={`config-tab-${tabId}`}
                 >
                   {configTabLabels[tabId]}
                 </button>
@@ -506,9 +506,22 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
           </div>
         )}
 
+        {/* API Key 分类 - 左右分栏布局 */}
+        {activeCategory === "apikey" && (
+          <div
+            className="h-[calc(100vh-280px)] min-h-[400px]"
+            data-testid="apikey-section"
+          >
+            <ApiKeyProviderSection
+              onAddCustomProvider={() => setAddCustomProviderModalOpen(true)}
+            />
+          </div>
+        )}
+
         {/* 配置 Tab 内容 */}
-        {isConfigTab(activeTab) ? (
-          configLoading ? (
+        {activeCategory === "config" &&
+          isConfigTab(activeTab) &&
+          (configLoading ? (
             <div className="flex items-center justify-center py-12">
               <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
@@ -564,157 +577,195 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
             <div className="flex items-center justify-center py-12 text-muted-foreground">
               加载配置失败
             </div>
-          )
-        ) : loading ? (
-          <div className="flex items-center justify-center py-12">
-            <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {/* Stats and Actions Bar */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                {currentStats && currentStats.total > 0 && (
-                  <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                    <span className="flex items-center gap-1">
-                      <Heart className="h-4 w-4 text-green-500" />
-                      健康: {currentStats.healthy}
-                    </span>
-                    <span className="flex items-center gap-1">
-                      <HeartOff className="h-4 w-4 text-red-500" />
-                      不健康: {currentStats.unhealthy}
-                    </span>
-                    <span>总计: {currentStats.total}</span>
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {currentCredentials.length > 0 && (
-                  <>
-                    <button
-                      onClick={() =>
-                        handleCheckTypeHealth(activeTab as PoolProviderType)
-                      }
-                      disabled={checkingHealth === activeTab}
-                      className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-                    >
-                      <Activity
-                        className={`h-4 w-4 ${checkingHealth === activeTab ? "animate-pulse" : ""}`}
-                      />
-                      检测全部
-                    </button>
-                    <button
-                      onClick={() =>
-                        handleResetTypeHealth(activeTab as PoolProviderType)
-                      }
-                      className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted"
-                    >
-                      <RotateCcw className="h-4 w-4" />
-                      重置状态
-                    </button>
-                    <button
-                      onClick={openAddModal}
-                      className="flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:bg-primary/90"
-                    >
-                      <Plus className="h-4 w-4" />
-                      添加凭证
-                    </button>
-                  </>
-                )}
-              </div>
+          ))}
+
+        {/* OAuth 凭证内容 - 卡片布局 */}
+        {activeCategory === "oauth" &&
+          !isConfigTab(activeTab) &&
+          (loading ? (
+            <div className="flex items-center justify-center py-12">
+              <RefreshCw className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
-
-            {/* Credentials List */}
-            {currentCredentials.length === 0 ? (
-              <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-12 text-muted-foreground">
-                <p className="text-lg">
-                  暂无 {providerLabels[activeTab as PoolProviderType]} 凭证
-                </p>
-                <p className="mt-1 text-sm">点击上方"添加凭证"按钮添加</p>
-                <button
-                  onClick={openAddModal}
-                  className="mt-4 flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90"
-                >
-                  <Plus className="h-4 w-4" />
-                  添加第一个凭证
-                </button>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-4">
-                {currentCredentials.map((credential) => {
-                  // 判断是否为 OAuth 类型（需要刷新 Token 功能）
-                  const isOAuthType =
-                    credential.credential_type.includes("oauth");
-                  // 判断是否为 Kiro 凭证（支持用量查询）
-                  const isKiroCredential = activeTab === "kiro";
-                  const isLocalActive =
-                    isKiroCredential && credential.uuid === localActiveUuid;
-
-                  if (isKiroCredential) {
-                    console.log(
-                      `[ProviderPoolPage] Credential ${credential.uuid.substring(0, 8)}: isLocalActive=${isLocalActive}, localActiveUuid=${localActiveUuid?.substring(0, 8)}`,
-                    );
-                  }
-
-                  return (
-                    <CredentialCardContextMenu
-                      key={credential.uuid}
-                      credential={credential}
-                      onRefreshToken={
-                        isOAuthType
-                          ? () => handleRefreshToken(credential.uuid)
-                          : undefined
-                      }
-                      onToggle={() => handleToggle(credential)}
-                      onDelete={() => handleDeleteClick(credential.uuid)}
-                      isOAuth={isOAuthType}
+          ) : (
+            <div className="space-y-4" data-testid="oauth-credentials-section">
+              {/* Stats and Actions Bar */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  {currentStats && currentStats.total > 0 && (
+                    <div
+                      className="flex items-center gap-3 text-sm text-muted-foreground"
+                      data-testid="oauth-stats"
                     >
-                      <div>
-                        <CredentialCard
-                          credential={credential}
-                          onToggle={() => handleToggle(credential)}
-                          onDelete={() => handleDeleteClick(credential.uuid)}
-                          onReset={() => handleReset(credential.uuid)}
-                          onCheckHealth={() =>
-                            handleCheckHealth(credential.uuid)
-                          }
-                          onRefreshToken={
-                            isOAuthType
-                              ? () => handleRefreshToken(credential.uuid)
-                              : undefined
-                          }
-                          onEdit={() => handleEdit(credential)}
-                          deleting={deletingCredentials.has(credential.uuid)}
-                          checkingHealth={checkingHealth === credential.uuid}
-                          refreshingToken={refreshingToken === credential.uuid}
-                          isKiroCredential={isKiroCredential}
-                          isLocalActive={isLocalActive}
-                          onSwitchToLocal={
-                            isKiroCredential ? fetchLocalActiveUuid : undefined
-                          }
+                      <span
+                        className="flex items-center gap-1"
+                        data-testid="healthy-count"
+                      >
+                        <Heart className="h-4 w-4 text-green-500" />
+                        健康: {currentStats.healthy}
+                      </span>
+                      <span
+                        className="flex items-center gap-1"
+                        data-testid="unhealthy-count"
+                      >
+                        <HeartOff className="h-4 w-4 text-red-500" />
+                        不健康: {currentStats.unhealthy}
+                      </span>
+                      <span data-testid="total-count">
+                        总计: {currentStats.total}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {currentCredentials.length > 0 && (
+                    <>
+                      <button
+                        onClick={() =>
+                          handleCheckTypeHealth(activeTab as PoolProviderType)
+                        }
+                        disabled={checkingHealth === activeTab}
+                        className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+                        data-testid="check-all-health-btn"
+                      >
+                        <Activity
+                          className={`h-4 w-4 ${checkingHealth === activeTab ? "animate-pulse" : ""}`}
                         />
-                      </div>
-                    </CredentialCardContextMenu>
-                  );
-                })}
+                        检测全部
+                      </button>
+                      <button
+                        onClick={() =>
+                          handleResetTypeHealth(activeTab as PoolProviderType)
+                        }
+                        className="flex items-center gap-1 rounded-lg border px-3 py-1.5 text-sm hover:bg-muted"
+                        data-testid="reset-health-btn"
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        重置状态
+                      </button>
+                      <button
+                        onClick={openAddModal}
+                        className="flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm text-primary-foreground hover:bg-primary/90"
+                        data-testid="add-credential-btn"
+                      >
+                        <Plus className="h-4 w-4" />
+                        添加凭证
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
-        )}
 
-        {/* Add Credential Modal (仅凭证池 tab) */}
-        {addModalOpen && !isConfigTab(activeTab) && (
-          <AddCredentialModal
-            providerType={activeTab as PoolProviderType}
-            onClose={() => {
-              setAddModalOpen(false);
-            }}
-            onSuccess={() => {
-              setAddModalOpen(false);
-              refresh();
-            }}
-          />
-        )}
+              {/* Credentials List */}
+              {currentCredentials.length === 0 ? (
+                <div
+                  className="flex flex-col items-center justify-center rounded-lg border border-dashed py-12 text-muted-foreground"
+                  data-testid="empty-credentials"
+                >
+                  <p className="text-lg">
+                    暂无 {providerLabels[activeTab as PoolProviderType]} 凭证
+                  </p>
+                  <p className="mt-1 text-sm">点击上方"添加凭证"按钮添加</p>
+                  <button
+                    onClick={openAddModal}
+                    className="mt-4 flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90"
+                    data-testid="add-first-credential-btn"
+                  >
+                    <Plus className="h-4 w-4" />
+                    添加第一个凭证
+                  </button>
+                </div>
+              ) : (
+                <div
+                  className="flex flex-col gap-4"
+                  data-testid="credentials-list"
+                >
+                  {currentCredentials.map((credential) => {
+                    // 判断是否为 OAuth 类型（需要刷新 Token 功能）
+                    const isOAuthType =
+                      credential.credential_type.includes("oauth");
+                    // 判断是否为 Kiro 凭证（支持用量查询）
+                    const isKiroCredential = activeTab === "kiro";
+                    const isLocalActive =
+                      isKiroCredential && credential.uuid === localActiveUuid;
+
+                    if (isKiroCredential) {
+                      console.log(
+                        `[ProviderPoolPage] Credential ${credential.uuid.substring(0, 8)}: isLocalActive=${isLocalActive}, localActiveUuid=${localActiveUuid?.substring(0, 8)}`,
+                      );
+                    }
+
+                    return (
+                      <CredentialCardContextMenu
+                        key={credential.uuid}
+                        credential={credential}
+                        onRefreshToken={
+                          isOAuthType
+                            ? () => handleRefreshToken(credential.uuid)
+                            : undefined
+                        }
+                        onToggle={() => handleToggle(credential)}
+                        onDelete={() => handleDeleteClick(credential.uuid)}
+                        isOAuth={isOAuthType}
+                      >
+                        <div data-testid={`credential-card-${credential.uuid}`}>
+                          <CredentialCard
+                            credential={credential}
+                            onToggle={() => handleToggle(credential)}
+                            onDelete={() => handleDeleteClick(credential.uuid)}
+                            onReset={() => handleReset(credential.uuid)}
+                            onCheckHealth={() =>
+                              handleCheckHealth(credential.uuid)
+                            }
+                            onRefreshToken={
+                              isOAuthType
+                                ? () => handleRefreshToken(credential.uuid)
+                                : undefined
+                            }
+                            onEdit={() => handleEdit(credential)}
+                            deleting={deletingCredentials.has(credential.uuid)}
+                            checkingHealth={checkingHealth === credential.uuid}
+                            refreshingToken={
+                              refreshingToken === credential.uuid
+                            }
+                            isKiroCredential={isKiroCredential}
+                            isLocalActive={isLocalActive}
+                            onSwitchToLocal={
+                              isKiroCredential
+                                ? fetchLocalActiveUuid
+                                : undefined
+                            }
+                          />
+                        </div>
+                      </CredentialCardContextMenu>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+
+        {/* Add Credential Modal (仅 OAuth 凭证 tab) */}
+        {addModalOpen &&
+          activeCategory === "oauth" &&
+          !isConfigTab(activeTab) && (
+            <AddCredentialModal
+              providerType={activeTab as PoolProviderType}
+              onClose={() => {
+                setAddModalOpen(false);
+              }}
+              onSuccess={() => {
+                setAddModalOpen(false);
+                refresh();
+              }}
+            />
+          )}
+
+        {/* Add Custom Provider Modal (API Key 分类) */}
+        <AddCustomProviderModal
+          isOpen={addCustomProviderModalOpen}
+          onClose={() => setAddCustomProviderModalOpen(false)}
+          onAdd={handleAddCustomProvider}
+        />
 
         {/* Edit Credential Modal */}
         <EditCredentialModal
@@ -729,7 +780,6 @@ export const ProviderPoolPage = forwardRef<ProviderPoolPageRef>(
           errors={errors}
           onDismiss={dismissError}
           onRetry={(error) => {
-            // 根据错误类型提供重试功能
             switch (error.type) {
               case "health_check":
                 if (error.uuid) {

@@ -1,16 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
-import {
-  User,
-  Bot,
-  Copy,
-  Edit2,
-  Trash2,
-  Lightbulb,
-  ChevronDown,
-  Check,
-} from "lucide-react";
+import { User, Bot, Copy, Edit2, Trash2, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   MessageListContainer,
@@ -23,9 +13,6 @@ import {
   TimeStamp,
   MessageBubble,
   MessageActions,
-  ThinkingBox,
-  ThinkingHeader,
-  ThinkingContent,
 } from "../styles";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { StreamingRenderer } from "./StreamingRenderer";
@@ -44,9 +31,6 @@ export const MessageList: React.FC<MessageListProps> = ({
   onEditMessage,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [expandedThinking, setExpandedThinking] = useState<
-    Record<string, boolean>
-  >({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState("");
@@ -56,10 +40,6 @@ export const MessageList: React.FC<MessageListProps> = ({
       scrollRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages]);
-
-  const toggleThinking = (id: string) => {
-    setExpandedThinking((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
 
   const formatTime = (date: Date) => {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -128,25 +108,6 @@ export const MessageList: React.FC<MessageListProps> = ({
               </MessageHeader>
 
               <MessageBubble $isUser={msg.role === "user"}>
-                {msg.isThinking && (
-                  <ThinkingBox $expanded={!!expandedThinking[msg.id]}>
-                    <ThinkingHeader onClick={() => toggleThinking(msg.id)}>
-                      <Lightbulb size={14} className="text-yellow-500" />
-                      <span>{msg.thinkingContent}</span>
-                      <ChevronDown
-                        size={14}
-                        className={cn(
-                          "ml-1 transition-transform duration-200",
-                          expandedThinking[msg.id] && "rotate-180",
-                        )}
-                      />
-                    </ThinkingHeader>
-                    {expandedThinking[msg.id] && (
-                      <ThinkingContent>正在深度思考...</ThinkingContent>
-                    )}
-                  </ThinkingBox>
-                )}
-
                 {editingId === msg.id ? (
                   <div className="flex flex-col gap-2">
                     <textarea
@@ -175,6 +136,7 @@ export const MessageList: React.FC<MessageListProps> = ({
                     isStreaming={msg.isThinking}
                     toolCalls={msg.toolCalls}
                     showCursor={msg.isThinking && !msg.content}
+                    contentParts={msg.contentParts}
                   />
                 ) : (
                   <MarkdownRenderer content={msg.content} />

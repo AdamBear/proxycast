@@ -1,6 +1,68 @@
 use rusqlite::Connection;
 
 pub fn create_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // API Key Provider 配置表
+    // _Requirements: 9.1_
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS api_key_providers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            api_host TEXT NOT NULL,
+            is_system INTEGER NOT NULL DEFAULT 0,
+            group_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            api_version TEXT,
+            project TEXT,
+            location TEXT,
+            region TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    // 创建 api_key_providers 索引
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_key_providers_group ON api_key_providers(group_name)",
+        [],
+    )?;
+
+    // API Key 条目表
+    // _Requirements: 9.1, 9.2_
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            api_key_encrypted TEXT NOT NULL,
+            alias TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            last_used_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (provider_id) REFERENCES api_key_providers(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    // 创建 api_keys 索引
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_keys_provider ON api_keys(provider_id)",
+        [],
+    )?;
+
+    // Provider UI 状态表
+    // _Requirements: 8.4_
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS provider_ui_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )?;
+
     // Providers 表
     conn.execute(
         "CREATE TABLE IF NOT EXISTS providers (

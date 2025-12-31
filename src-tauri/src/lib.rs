@@ -1,10 +1,11 @@
 pub mod agent;
+pub mod backends;
 pub mod browser_interceptor;
 mod commands;
 mod config;
 mod converter;
 pub mod credential;
-mod database;
+pub mod database;
 pub mod flow_monitor;
 pub mod injection;
 mod logger;
@@ -18,9 +19,11 @@ pub mod resilience;
 pub mod router;
 mod server;
 mod server_utils;
-mod services;
+pub mod services;
+pub mod stream;
 pub mod streaming;
 pub mod telemetry;
+pub mod translator;
 pub mod tray;
 pub mod websocket;
 
@@ -30,6 +33,7 @@ use tauri::{Manager, Runtime};
 use tokio::sync::RwLock;
 
 use agent::NativeAgentState;
+use commands::api_key_provider_cmd::ApiKeyProviderServiceState;
 use commands::browser_interceptor_cmd::BrowserInterceptorState;
 use commands::flow_monitor_cmd::{
     BatchOperationsState, BookmarkManagerState, EnhancedStatsServiceState, FlowInterceptorState,
@@ -48,6 +52,7 @@ use flow_monitor::{
     FlowMonitor, FlowMonitorConfig, FlowQueryService, FlowReplayer, InterceptConfig,
     QuickFilterManager, SessionManager,
 };
+use services::api_key_provider_service::ApiKeyProviderService;
 use services::provider_pool_service::ProviderPoolService;
 use services::skill_service::SkillService;
 use services::token_cache_service::TokenCacheService;
@@ -1528,6 +1533,11 @@ pub fn run() {
     let provider_pool_service = ProviderPoolService::new();
     let provider_pool_service_state = ProviderPoolServiceState(Arc::new(provider_pool_service));
 
+    // Initialize ApiKeyProviderService
+    let api_key_provider_service = ApiKeyProviderService::new();
+    let api_key_provider_service_state =
+        ApiKeyProviderServiceState(Arc::new(api_key_provider_service));
+
     // Initialize CredentialSyncService (optional - only if config manager is available)
     // For now, we initialize it as None since ConfigManager requires async setup
     // This can be enhanced later to properly initialize with ConfigManager
@@ -1775,6 +1785,7 @@ pub fn run() {
         .manage(db)
         .manage(skill_service_state)
         .manage(provider_pool_service_state)
+        .manage(api_key_provider_service_state)
         .manage(credential_sync_service_state)
         .manage(token_cache_service_state)
         .manage(machine_id_service_state)
@@ -2170,6 +2181,24 @@ pub fn run() {
             commands::provider_pool_cmd::install_playwright,
             commands::provider_pool_cmd::start_kiro_playwright_login,
             commands::provider_pool_cmd::cancel_kiro_playwright_login,
+            // API Key Provider commands
+            commands::api_key_provider_cmd::get_api_key_providers,
+            commands::api_key_provider_cmd::get_api_key_provider,
+            commands::api_key_provider_cmd::add_custom_api_key_provider,
+            commands::api_key_provider_cmd::update_api_key_provider,
+            commands::api_key_provider_cmd::delete_custom_api_key_provider,
+            commands::api_key_provider_cmd::add_api_key,
+            commands::api_key_provider_cmd::delete_api_key,
+            commands::api_key_provider_cmd::toggle_api_key,
+            commands::api_key_provider_cmd::update_api_key_alias,
+            commands::api_key_provider_cmd::get_next_api_key,
+            commands::api_key_provider_cmd::record_api_key_usage,
+            commands::api_key_provider_cmd::record_api_key_error,
+            commands::api_key_provider_cmd::get_provider_ui_state,
+            commands::api_key_provider_cmd::set_provider_ui_state,
+            commands::api_key_provider_cmd::update_provider_sort_orders,
+            commands::api_key_provider_cmd::export_api_key_providers,
+            commands::api_key_provider_cmd::import_api_key_providers,
             // Route commands
             commands::route_cmd::get_available_routes,
             commands::route_cmd::get_route_curl_examples,

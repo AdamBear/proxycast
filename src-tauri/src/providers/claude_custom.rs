@@ -409,12 +409,36 @@ impl StreamingProvider for ClaudeCustomProvider {
         // 转换 OpenAI 请求为 Anthropic 格式
         let mut anthropic_messages = Vec::new();
         let mut system_content = None;
+        // 收集 tool 角色消息的 tool_result，稍后合并到 user 消息中
+        let mut pending_tool_results: Vec<serde_json::Value> = Vec::new();
 
         for msg in &request.messages {
             let role = &msg.role;
 
+            // 处理 tool 角色消息（工具调用结果）
+            if role == "tool" {
+                // 转换为 Anthropic tool_result content block
+                let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
+                let content = msg.get_content_text();
+                pending_tool_results.push(serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": content
+                }));
+                continue;
+            }
+
+            // 如果有待处理的 tool_results 且当前不是 assistant 消息，先添加一个 user 消息
+            if !pending_tool_results.is_empty() && role != "assistant" {
+                anthropic_messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": pending_tool_results.clone()
+                }));
+                pending_tool_results.clear();
+            }
+
             // 提取消息内容，转换为 Anthropic 格式的 content 数组
-            let content_blocks: Vec<serde_json::Value> = match &msg.content {
+            let mut content_blocks: Vec<serde_json::Value> = match &msg.content {
                 Some(MessageContent::Text(text)) => {
                     if text.is_empty() {
                         vec![]
@@ -443,6 +467,23 @@ impl StreamingProvider for ClaudeCustomProvider {
                 None => vec![],
             };
 
+            // 处理 assistant 消息中的 tool_calls
+            if role == "assistant" {
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    for tc in tool_calls {
+                        // 解析 arguments JSON
+                        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or(serde_json::json!({}));
+                        content_blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "input": input
+                        }));
+                    }
+                }
+            }
+
             if role == "system" {
                 // system 消息只提取文本
                 let text = content_blocks
@@ -464,6 +505,14 @@ impl StreamingProvider for ClaudeCustomProvider {
             }
         }
 
+        // 处理末尾的 tool_results
+        if !pending_tool_results.is_empty() {
+            anthropic_messages.push(serde_json::json!({
+                "role": "user",
+                "content": pending_tool_results
+            }));
+        }
+
         let mut anthropic_body = serde_json::json!({
             "model": request.model,
             "max_tokens": request.max_tokens.unwrap_or(4096),
@@ -473,6 +522,76 @@ impl StreamingProvider for ClaudeCustomProvider {
 
         if let Some(sys) = system_content {
             anthropic_body["system"] = serde_json::json!(sys);
+        }
+
+        // 转换 tools: OpenAI 格式 -> Anthropic 格式
+        if let Some(ref tools) = request.tools {
+            let anthropic_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .filter_map(|tool| {
+                    match tool {
+                        crate::models::openai::Tool::Function { function } => {
+                            Some(serde_json::json!({
+                                "name": function.name,
+                                "description": function.description.clone().unwrap_or_default(),
+                                "input_schema": function.parameters.clone().unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}))
+                            }))
+                        }
+                        // WebSearch 等其他工具类型暂不处理
+                        _ => None,
+                    }
+                })
+                .collect();
+
+            if !anthropic_tools.is_empty() {
+                anthropic_body["tools"] = serde_json::json!(anthropic_tools);
+                tracing::info!(
+                    "[CLAUDE_STREAM] 添加 {} 个工具到请求",
+                    anthropic_tools.len()
+                );
+            }
+        }
+
+        // 转换 tool_choice: OpenAI 格式 -> Anthropic 格式
+        if let Some(ref tool_choice) = request.tool_choice {
+            let anthropic_tool_choice = match tool_choice {
+                serde_json::Value::String(s) => {
+                    match s.as_str() {
+                        "none" => Some(serde_json::json!({"type": "none"})),
+                        "auto" => Some(serde_json::json!({"type": "auto"})),
+                        "required" | "any" => Some(serde_json::json!({"type": "any"})),
+                        _ => None, // 未知值，不设置
+                    }
+                }
+                serde_json::Value::Object(obj) => {
+                    // 处理 {"type": "function", "function": {"name": "xxx"}} 格式
+                    if let Some(func) = obj.get("function") {
+                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                            Some(serde_json::json!({"type": "tool", "name": name}))
+                        } else {
+                            None
+                        }
+                    } else if let Some(t) = obj.get("type").and_then(|t| t.as_str()) {
+                        match t {
+                            "any" | "tool" => Some(serde_json::json!({"type": "any"})),
+                            "auto" => Some(serde_json::json!({"type": "auto"})),
+                            "none" => Some(serde_json::json!({"type": "none"})),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(tc) = anthropic_tool_choice {
+                anthropic_body["tool_choice"] = tc;
+                tracing::info!(
+                    "[CLAUDE_STREAM] 设置 tool_choice: {:?}",
+                    anthropic_body["tool_choice"]
+                );
+            }
         }
 
         let url = self.build_url("messages");

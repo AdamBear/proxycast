@@ -150,6 +150,11 @@ impl ToolLoopEngine {
         self.config.max_iterations
     }
 
+    /// 获取工具注册表引用
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
     /// 检查响应是否包含工具调用
     ///
     /// Requirements: 7.1 - WHEN the Agent response contains tool_calls
@@ -227,6 +232,7 @@ impl ToolLoopEngine {
                     .send(StreamEvent::ToolStart {
                         tool_name: tool_call.function.name.clone(),
                         tool_id: tool_call.id.clone(),
+                        arguments: Some(tool_call.function.arguments.clone()),
                     })
                     .await;
             }
@@ -891,7 +897,7 @@ mod proptests {
                 // 验证：收到 ToolStart 事件
                 let event1 = rx.recv().await;
                 prop_assert!(event1.is_some(), "应该收到 ToolStart 事件");
-                if let Some(StreamEvent::ToolStart { tool_name, tool_id: event_tool_id }) = event1 {
+                if let Some(StreamEvent::ToolStart { tool_name, tool_id: event_tool_id, .. }) = event1 {
                     prop_assert_eq!(tool_name, "echo", "工具名称应该为 'echo'");
                     prop_assert_eq!(event_tool_id, tool_id.clone(), "工具 ID 应该匹配");
                 } else {

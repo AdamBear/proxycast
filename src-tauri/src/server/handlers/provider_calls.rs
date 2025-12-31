@@ -66,10 +66,11 @@ use crate::server_utils::{
     build_anthropic_response, build_anthropic_stream_response, parse_cw_response, safe_truncate,
     CWParsedResponse,
 };
+use crate::stream::{PipelineConfig, StreamPipeline};
 use crate::streaming::traits::StreamingProvider;
 use crate::streaming::{
-    AnthropicSseGenerator, AwsEvent, AwsEventStreamParser, StreamConfig, StreamContext,
-    StreamError, StreamFormat as StreamingFormat, StreamManager, StreamResponse,
+    StreamConfig, StreamContext, StreamError, StreamFormat as StreamingFormat, StreamManager,
+    StreamResponse,
 };
 
 /// 根据凭证调用 Provider (Anthropic 格式)
@@ -765,6 +766,27 @@ pub async fn call_provider_openai(
     _flow_id: Option<&str>,
 ) -> Response {
     let _start_time = std::time::Instant::now();
+
+    // 调试：打印凭证类型
+    let cred_type = match &credential.credential {
+        CredentialData::KiroOAuth { .. } => "KiroOAuth",
+        CredentialData::ClaudeKey { .. } => "ClaudeKey",
+        CredentialData::OpenAIKey { .. } => "OpenAIKey",
+        CredentialData::GeminiOAuth { .. } => "GeminiOAuth",
+        CredentialData::GeminiApiKey { .. } => "GeminiApiKey",
+        CredentialData::VertexKey { .. } => "VertexKey",
+        CredentialData::QwenOAuth { .. } => "QwenOAuth",
+        CredentialData::AntigravityOAuth { .. } => "AntigravityOAuth",
+        _ => "Other",
+    };
+    tracing::info!(
+        "[CALL_PROVIDER_OPENAI] 凭证类型={}, 凭证名称={:?}, provider_type={}, uuid={}",
+        cred_type,
+        credential.name,
+        credential.provider_type,
+        &credential.uuid[..8]
+    );
+
     match &credential.credential {
         CredentialData::KiroOAuth { creds_file_path } => {
             // 优先使用 token cache，避免每次都刷新 token
@@ -842,17 +864,15 @@ pub async fn call_provider_openai(
 
                         tracing::info!("[OPENAI_STREAM] 开始转换流式响应");
 
-                        // 创建 StreamConverter 将 AWS Event Stream 转换为 OpenAI SSE
-                        let converter = std::sync::Arc::new(tokio::sync::Mutex::new(
-                            crate::streaming::converter::StreamConverter::with_model(
-                                crate::streaming::converter::StreamFormat::AwsEventStream,
-                                crate::streaming::converter::StreamFormat::OpenAiSse,
-                                &request.model,
-                            ),
+                        // 使用新的统一流处理管道 (Kiro → OpenAI)
+                        let config = PipelineConfig::kiro_to_openai(request.model.clone());
+                        let pipeline = std::sync::Arc::new(tokio::sync::Mutex::new(
+                            StreamPipeline::new(config),
                         ));
 
                         // 创建转换流
-                        let converter_for_stream = converter.clone();
+                        let pipeline_for_stream = pipeline.clone();
+                        let pipeline_for_finalize = pipeline.clone();
                         let final_stream = async_stream::stream! {
                             use futures::StreamExt;
 
@@ -866,10 +886,10 @@ pub async fn call_provider_openai(
                                             bytes.len()
                                         );
 
-                                        // 转换 chunk
+                                        // 使用 Pipeline 处理 chunk
                                         let sse_events = {
-                                            let mut converter_guard = converter_for_stream.lock().await;
-                                            converter_guard.convert(&bytes)
+                                            let mut pipeline_guard = pipeline_for_stream.lock().await;
+                                            pipeline_guard.process_chunk(&bytes)
                                         };
 
                                         tracing::debug!(
@@ -879,7 +899,7 @@ pub async fn call_provider_openai(
 
                                         // yield 每个 SSE 事件
                                         for sse_str in sse_events {
-                                            yield Ok::<String, crate::streaming::StreamError>(sse_str);
+                                            yield Ok::<String, StreamError>(sse_str);
                                         }
                                     }
                                     Err(e) => {
@@ -892,16 +912,16 @@ pub async fn call_provider_openai(
 
                             tracing::info!("[OPENAI_STREAM] 流结束，生成 finalize 事件");
 
-                            // 流结束，生成结束事件
+                            // 流结束，使用 Pipeline 生成结束事件
                             let final_events = {
-                                let mut converter_guard = converter_for_stream.lock().await;
-                                converter_guard.finish()
+                                let mut pipeline_guard = pipeline_for_finalize.lock().await;
+                                pipeline_guard.finish()
                             };
 
                             tracing::info!("[OPENAI_STREAM] finalize 生成 {} 个事件", final_events.len());
 
                             for sse_str in final_events {
-                                yield Ok::<String, crate::streaming::StreamError>(sse_str);
+                                yield Ok::<String, StreamError>(sse_str);
                             }
                         };
 
@@ -1954,13 +1974,10 @@ pub async fn handle_kiro_stream(
     // 使用缓存的 token 覆盖文件中的 token（缓存的 token 更新）
     kiro.credentials.access_token = Some(token);
 
-    // 转换请求格式
-    let openai_request = convert_anthropic_to_openai(request);
+    tracing::info!("[KIRO_STREAM] 准备调用 call_api_stream_anthropic (直接转换)");
 
-    tracing::info!("[KIRO_STREAM] 准备调用 call_api_stream");
-
-    // 调用流式 API（需求 4.1, 4.2, 4.3: 401/403 错误重试逻辑）
-    let stream_response = match kiro.call_api_stream(&openai_request).await {
+    // 调用流式 API - 直接使用 Anthropic 格式（需求 4.1, 4.2, 4.3: 401/403 错误重试逻辑）
+    let stream_response = match kiro.call_api_stream_anthropic(request).await {
         Ok(stream) => {
             tracing::info!("[KIRO_STREAM] call_api_stream 成功返回流");
             stream
@@ -2009,7 +2026,7 @@ pub async fn handle_kiro_stream(
 
                 // 使用新 token 重试（需求 4.2）
                 kiro.credentials.access_token = Some(new_token);
-                match kiro.call_api_stream(&openai_request).await {
+                match kiro.call_api_stream_anthropic(request).await {
                     Ok(stream) => stream,
                     Err(retry_err) => {
                         let _ = state.pool_service.mark_unhealthy(
@@ -2060,24 +2077,20 @@ pub async fn handle_kiro_stream(
         flow_id
     );
 
-    // 创建 AWS Event Stream 解析器和 Anthropic SSE 生成器
-    let parser = std::sync::Arc::new(tokio::sync::Mutex::new(AwsEventStreamParser::new()));
-    let generator = std::sync::Arc::new(tokio::sync::Mutex::new(AnthropicSseGenerator::new(
-        &request.model,
-    )));
+    // 使用新的统一流处理管道 (Kiro → Anthropic)
+    let config = PipelineConfig::kiro_to_anthropic(request.model.clone());
+    let pipeline = std::sync::Arc::new(tokio::sync::Mutex::new(StreamPipeline::new(config)));
 
     // 获取 flow_id 的克隆用于回调
     let flow_id_owned = flow_id.map(|s| s.to_string());
     let flow_monitor = state.flow_monitor.clone();
 
-    // 创建转换流 - 使用 map 而不是 then，避免异步闭包的复杂性
-    let parser_clone = parser.clone();
-    let generator_clone = generator.clone();
+    // 创建转换流
+    let pipeline_clone = pipeline.clone();
     let flow_id_for_stream = flow_id_owned.clone();
     let flow_monitor_for_stream = flow_monitor.clone();
 
-    // 使用 async_stream 直接处理整个流
-    let generator_for_finalize = generator.clone();
+    let pipeline_for_finalize = pipeline.clone();
     let flow_id_for_finalize = flow_id_owned.clone();
     let flow_monitor_for_finalize = flow_monitor.clone();
 
@@ -2089,112 +2102,60 @@ pub async fn handle_kiro_stream(
         while let Some(chunk_result) = stream_response.next().await {
             match chunk_result {
                 Ok(bytes) => {
-                    // 调试日志：记录接收到的字节数和原始数据预览
-                    let bytes_preview = if bytes.len() > 200 {
-                        format!("{}...", String::from_utf8_lossy(&bytes[..200]))
-                    } else {
-                        String::from_utf8_lossy(&bytes).to_string()
-                    };
-                    tracing::info!(
-                        "[KIRO_STREAM] 收到 {} 字节数据, 预览: {}",
-                        bytes.len(),
-                        bytes_preview.replace('\n', "\\n")
+                    // 调试日志：记录接收到的字节数
+                    tracing::debug!(
+                        "[KIRO_STREAM] 收到 {} 字节数据",
+                        bytes.len()
                     );
 
-                    // 解析 AWS Event Stream
-                    let events = {
-                        let mut parser_guard = parser_clone.lock().await;
-                        parser_guard.process(&bytes)
+                    // 使用 Pipeline 处理字节块
+                    let sse_strings = {
+                        let mut pipeline_guard = pipeline_clone.lock().await;
+                        pipeline_guard.process_chunk(&bytes)
                     };
 
-                    // 调试日志：记录解析出的事件数量
-                    tracing::info!(
-                        "[KIRO_STREAM] 解析出 {} 个事件",
-                        events.len()
+                    // 调试日志：记录生成的 SSE 事件数量
+                    tracing::debug!(
+                        "[KIRO_STREAM] 生成 {} 个 SSE 事件",
+                        sse_strings.len()
                     );
 
-                    // 转换为 Anthropic SSE 事件
-                    for event in events {
-                        // 需求 5.2: 当 AWS Event Stream 解析失败时记录警告，跳过无效数据继续处理
-                        if let AwsEvent::ParseError { message, raw_data } = &event {
-                            tracing::warn!(
-                                "[KIRO_STREAM] AWS Event Stream 解析错误: {}, 原始数据: {:?}",
-                                message,
-                                raw_data.as_ref().map(|s| if s.len() > 100 { &s[..100] } else { s })
-                            );
-                            // 跳过无效数据，继续处理后续 chunks
-                            continue;
-                        }
+                    for sse_str in sse_strings {
+                        // 调用 FlowMonitor.process_chunk()（需求 3.2）
+                        if let Some(ref fid) = flow_id_for_stream {
+                            // 解析 SSE 事件类型和数据
+                            let lines: Vec<&str> = sse_str.lines().collect();
+                            let mut event_type: Option<&str> = None;
+                            let mut data: Option<&str> = None;
 
-                        // 调试日志：记录事件类型
-                        tracing::info!(
-                            "[KIRO_STREAM] 处理事件: {:?}",
-                            match &event {
-                                AwsEvent::Content { text } => format!("Content({}字符): {}", text.len(), if text.len() > 50 { &text[..50] } else { text }),
-                                AwsEvent::ToolUseStart { id, name } => format!("ToolUseStart({}, {})", id, name),
-                                AwsEvent::ToolUseInput { id, input } => format!("ToolUseInput({}, {}字符)", id, input.len()),
-                                AwsEvent::ToolUseStop { id } => format!("ToolUseStop({})", id),
-                                AwsEvent::Stop => "Stop".to_string(),
-                                AwsEvent::Usage { credits, context_percentage } => format!("Usage({}, {})", credits, context_percentage),
-                                AwsEvent::FollowupPrompt { content } => format!("FollowupPrompt({}字符)", content.len()),
-                                AwsEvent::ParseError { message, .. } => format!("ParseError({})", message),
-                            }
-                        );
-
-                        let sse_strings = {
-                            let mut generator_guard = generator_clone.lock().await;
-                            generator_guard.process_event(event)
-                        };
-
-                        // 调试日志：记录生成的 SSE 事件数量和内容预览
-                        tracing::info!(
-                            "[KIRO_STREAM] 生成 {} 个 SSE 事件",
-                            sse_strings.len()
-                        );
-
-                        for sse_str in sse_strings {
-                            let preview = if sse_str.len() > 200 { &sse_str[..200] } else { &sse_str };
-                            tracing::info!(
-                                "[KIRO_STREAM] SSE 事件: {}",
-                                preview.replace('\n', "\\n")
-                            );
-
-                            // 调用 FlowMonitor.process_chunk()（需求 3.2）
-                            if let Some(ref fid) = flow_id_for_stream {
-                                // 解析 SSE 事件类型和数据
-                                let lines: Vec<&str> = sse_str.lines().collect();
-                                let mut event_type: Option<&str> = None;
-                                let mut data: Option<&str> = None;
-
-                                for line in &lines {
-                                    if line.starts_with("event: ") {
-                                        event_type = Some(&line[7..]);
-                                    } else if line.starts_with("data: ") {
-                                        data = Some(&line[6..]);
-                                    }
-                                }
-
-                                if let Some(d) = data {
-                                    let flow_monitor_clone = flow_monitor_for_stream.clone();
-                                    let fid_clone = fid.clone();
-                                    let event_type_owned = event_type.map(|s| s.to_string());
-                                    let data_owned = d.to_string();
-
-                                    tokio::spawn(async move {
-                                        flow_monitor_clone
-                                            .process_chunk(
-                                                &fid_clone,
-                                                event_type_owned.as_deref(),
-                                                &data_owned,
-                                            )
-                                            .await;
-                                    });
+                            for line in &lines {
+                                if line.starts_with("event: ") {
+                                    event_type = Some(&line[7..]);
+                                } else if line.starts_with("data: ") {
+                                    data = Some(&line[6..]);
                                 }
                             }
 
-                            // 立即 yield SSE 事件
-                            yield Ok::<String, StreamError>(sse_str);
+                            if let Some(d) = data {
+                                let flow_monitor_clone = flow_monitor_for_stream.clone();
+                                let fid_clone = fid.clone();
+                                let event_type_owned = event_type.map(|s| s.to_string());
+                                let data_owned = d.to_string();
+
+                                tokio::spawn(async move {
+                                    flow_monitor_clone
+                                        .process_chunk(
+                                            &fid_clone,
+                                            event_type_owned.as_deref(),
+                                            &data_owned,
+                                        )
+                                        .await;
+                                });
+                            }
                         }
+
+                        // 立即 yield SSE 事件
+                        yield Ok::<String, StreamError>(sse_str);
                     }
                 }
                 Err(e) => {
@@ -2232,19 +2193,15 @@ pub async fn handle_kiro_stream(
 
         tracing::info!("[KIRO_STREAM] 流结束，生成 finalize 事件");
 
-        // 流结束，生成 finalize 事件
+        // 流结束，使用 Pipeline 生成 finalize 事件
         let final_events = {
-            let mut generator_guard = generator_for_finalize.lock().await;
-            generator_guard.finalize()
+            let mut pipeline_guard = pipeline_for_finalize.lock().await;
+            pipeline_guard.finish()
         };
 
-        tracing::info!("[KIRO_STREAM] finalize 生成 {} 个事件", final_events.len());
+        tracing::debug!("[KIRO_STREAM] finalize 生成 {} 个事件", final_events.len());
 
         for sse_str in final_events {
-            tracing::info!(
-                "[KIRO_STREAM] finalize 事件: {}",
-                if sse_str.len() > 200 { &sse_str[..200] } else { &sse_str }.replace('\n', "\\n")
-            );
             // 调用 FlowMonitor.process_chunk()
             if let Some(ref fid) = flow_id_for_finalize {
                 let lines: Vec<&str> = sse_str.lines().collect();
